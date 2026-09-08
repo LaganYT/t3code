@@ -7,7 +7,7 @@ import {
   GitPullRequestIcon,
   SettingsIcon,
 } from "lucide-react";
-import type { ReactNode } from "react";
+import type { MouseEvent as ReactMouseEvent, ReactNode } from "react";
 import { memo, useCallback, useMemo } from "react";
 import {
   Link,
@@ -75,23 +75,21 @@ export const SidebarChromeHeader = memo(function SidebarChromeHeader({
       routeParams.threadId as ScopedThreadRef["threadId"],
     );
   }, [routeParams.environmentId, routeParams.threadId]);
-  const handoffAvailable =
-    threadRef !== null &&
-    readThreadShell(threadRef) !== null &&
-    buildModelHandoffMenuItem(threadRef)?.children?.length !== 0;
+  const handoffItem = threadRef === null ? null : buildModelHandoffMenuItem(threadRef);
+  const handoffAvailable = (handoffItem?.children?.length ?? 0) > 0;
 
   const handleHandoffClick = useCallback(
-    (event: React.MouseEvent<HTMLButtonElement>) => {
+    (event: ReactMouseEvent<HTMLButtonElement>) => {
       if (threadRef === null) return;
       const api = readLocalApi();
       if (!api) return;
       const thread = readThreadShell(threadRef);
-      const handoffItem = buildModelHandoffMenuItem(threadRef, {
+      const menuItem = buildModelHandoffMenuItem(threadRef, {
         disabled:
           thread?.session?.status === "running" && thread.session.activeTurnId != null,
       });
-      const children = handoffItem?.children ?? [];
-      if (children.length === 0) return;
+      const children = menuItem?.children ?? [];
+      if (children.length === 0 || menuItem?.disabled) return;
       const rect = event.currentTarget.getBoundingClientRect();
       void (async () => {
         const clicked = await settlePromise(() =>
