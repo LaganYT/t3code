@@ -2,6 +2,7 @@ import { describe, expect, it } from "@effect/vitest";
 import { ProviderInstanceId } from "@t3tools/contracts";
 import {
   buildModelHandoffMessage,
+  buildTranscriptHandoffFallback,
   MODEL_HANDOFF_SUMMARY_REQUEST,
   MODEL_HANDOFF_WAIT_INSTRUCTION,
   modelHandoffActionId,
@@ -51,6 +52,26 @@ describe("model handoff", () => {
     expect(message).toContain("Target model: claude-opus-5");
     expect(message).toContain("branch feat/provider-switch");
     expect(message).toContain("Initial routing changes are complete");
+    expect(message).toContain(MODEL_HANDOFF_WAIT_INSTRUCTION);
+  });
+
+  it("falls back to recent transcript context when the source model cannot summarize", () => {
+    const fallback = buildTranscriptHandoffFallback([
+      { role: "user", text: "Add a model handoff feature." },
+      { role: "assistant", text: "The handoff workflow is implemented on feat/model-handoff." },
+    ]);
+    const message = buildModelHandoffMessage({
+      threadTitle: "Model handoff",
+      branch: "feat/model-handoff",
+      sourceModelSelection: source,
+      targetModelSelection: target,
+      summary: fallback,
+      summarySource: "transcript-fallback",
+    });
+
+    expect(fallback).toContain("USER: Add a model handoff feature.");
+    expect(fallback).toContain("ASSISTANT: The handoff workflow is implemented");
+    expect(message).toContain("## Recent transcript fallback");
     expect(message).toContain(MODEL_HANDOFF_WAIT_INSTRUCTION);
   });
 
