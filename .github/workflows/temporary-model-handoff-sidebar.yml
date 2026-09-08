@@ -4,13 +4,14 @@ on:
   push:
     branches:
       - feat/model-handoff
+    paths:
+      - .github/workflows/temporary-model-handoff-sidebar.yml
 
 permissions:
   contents: write
 
 jobs:
   patch-sidebar:
-    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -18,6 +19,7 @@ jobs:
           ref: feat/model-handoff
           fetch-depth: 0
       - name: Patch sidebar and picker
+        shell: bash
         run: |
           python3 <<'PY'
           from pathlib import Path
@@ -129,6 +131,7 @@ jobs:
           picker.write_text(text)
           PY
       - name: Commit integration
+        shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
