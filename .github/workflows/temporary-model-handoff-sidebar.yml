@@ -1,0 +1,137 @@
+name: Temporary model handoff sidebar integration
+
+on:
+  push:
+    branches:
+      - feat/model-handoff
+
+permissions:
+  contents: write
+
+jobs:
+  patch-sidebar:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/model-handoff
+          fetch-depth: 0
+      - name: Patch sidebar and picker
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          sidebar = Path('apps/web/src/components/Sidebar.tsx')
+          text = sidebar.read_text()
+
+          old = 'import { useThreadActions } from "../hooks/useThreadActions";\n'
+          new = (
+              'import { useThreadActions } from "../hooks/useThreadActions";\n'
+              'import { useModelHandoff } from "../hooks/useModelHandoff";\n'
+              'import { parseModelHandoffActionId } from "../lib/modelHandoff";\n'
+              'import { buildModelHandoffMenuItem, insertModelHandoffMenuItem } from "../lib/modelHandoffMenu";\n'
+          )
+          assert old in text
+          text = text.replace(old, new, 1)
+
+          old = '} = useThreadActions();\n  const updateThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata, {'
+          new = '} = useThreadActions();\n  const { handoffModel } = useModelHandoff();\n  const updateThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata, {'
+          assert old in text
+          text = text.replace(old, new, 1)
+
+          old = '''        // Presets resolve at menu-open time (same as the popover).
+        const snoozePresets = resolveSnoozePresets(new Date(), timestampFormat);
+        const clicked = await settlePromise(() =>
+          api.contextMenu.show(
+            buildThreadActionMenuItems({
+              branch: thread.branch ?? null,
+              isPinned,
+              isSettled,
+              isSnoozed,
+              canSnoozeNow: canSnooze(thread, { now: new Date().toISOString() }),
+              isRegeneratingTitle,
+              isRunning:
+                thread.session?.status === "running" && thread.session.activeTurnId != null,
+              supports: {
+                settlement: supportsSettlement,
+                snooze: supportsSnooze,
+                pinning: supportsPinning,
+                titleRegeneration: supportsTitleRegeneration,
+              },
+              snoozePresets,
+            }),
+            position,
+          ),
+        );
+        if (clicked._tag === "Failure") return;
+'''
+          new = '''        // Presets resolve at menu-open time (same as the popover).
+        const snoozePresets = resolveSnoozePresets(new Date(), timestampFormat);
+        const isRunning =
+          thread.session?.status === "running" && thread.session.activeTurnId != null;
+        const baseMenuItems = buildThreadActionMenuItems({
+          branch: thread.branch ?? null,
+          isPinned,
+          isSettled,
+          isSnoozed,
+          canSnoozeNow: canSnooze(thread, { now: new Date().toISOString() }),
+          isRegeneratingTitle,
+          isRunning,
+          supports: {
+            settlement: supportsSettlement,
+            snooze: supportsSnooze,
+            pinning: supportsPinning,
+            titleRegeneration: supportsTitleRegeneration,
+          },
+          snoozePresets,
+        });
+        const handoffItem = buildModelHandoffMenuItem(threadRef, { disabled: isRunning });
+        const menuItems = insertModelHandoffMenuItem(baseMenuItems, handoffItem);
+        const clicked = await settlePromise(() => api.contextMenu.show(menuItems, position));
+        if (clicked._tag === "Failure") return;
+        if (typeof clicked.value === "string") {
+          const handoffSelection = parseModelHandoffActionId(clicked.value);
+          if (handoffSelection !== null) {
+            await handoffModel(threadRef, handoffSelection);
+            return;
+          }
+        }
+'''
+          assert old in text
+          text = text.replace(old, new, 1)
+
+          old = '      handleMultiSelectContextMenu,\n      markThreadUnread,'
+          new = '      handleMultiSelectContextMenu,\n      handoffModel,\n      markThreadUnread,'
+          assert old in text
+          text = text.replace(old, new, 1)
+
+          sidebar.write_text(text)
+
+          picker = Path('apps/web/src/components/chat/ModelPickerContent.tsx')
+          text = picker.read_text()
+          old = '''  const isHandoffTarget = useCallback(
+    (instanceId: ProviderInstanceId, model: string) =>
+      handoffEnabled && isModelHandoff(instanceId, model),
+    [handoffEnabled, isModelHandoff],
+  );
+'''
+          new = '''  const isHandoffTarget = useCallback(
+    (instanceId: ProviderInstanceId, model: string) => {
+      if (!handoffEnabled || isModelHandoff === undefined) return false;
+      return isModelHandoff(instanceId, model);
+    },
+    [handoffEnabled, isModelHandoff],
+  );
+'''
+          assert old in text
+          text = text.replace(old, new, 1)
+          picker.write_text(text)
+          PY
+      - name: Commit integration
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apps/web/src/components/Sidebar.tsx apps/web/src/components/chat/ModelPickerContent.tsx
+          git commit -m "feat(web): expose model handoff from sidebar"
+          git push origin HEAD:feat/model-handoff
