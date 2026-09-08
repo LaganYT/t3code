@@ -1,10 +1,13 @@
+import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import {
   ANTIGRAVITY_DEFAULT_MODEL,
   type ProviderInstanceId,
   type ProviderDriverKind,
   type ResolvedKeybindingsConfig,
+  type ScopedThreadRef,
 } from "@t3tools/contracts";
-import { memo, useEffect, useMemo, useState } from "react";
+import { useParams } from "@tanstack/react-router";
+import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import type { VariantProps } from "class-variance-authority";
 import { Badge } from "../ui/badge";
 import { buttonVariants } from "../ui/button";
@@ -25,6 +28,7 @@ import {
   type ComposerControlSize,
 } from "./ComposerControl";
 import { composerFloatingLayerProps } from "./composerEventScope";
+import { useModelHandoff } from "../../hooks/useModelHandoff";
 
 export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
   /**
@@ -58,6 +62,20 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
   const [uncontrolledIsMenuOpen, setUncontrolledIsMenuOpen] = useState(false);
   const isMenuOpen = props.open ?? uncontrolledIsMenuOpen;
   const size = props.size ?? "sm";
+  const routeParams = useParams({ strict: false }) as Partial<
+    Record<"environmentId" | "threadId", string>
+  >;
+  const { handoffModel } = useModelHandoff();
+
+  const handoffThreadRef = useMemo((): ScopedThreadRef | null => {
+    const environmentId = routeParams.environmentId;
+    const threadId = routeParams.threadId;
+    if (!environmentId || !threadId) return null;
+    return scopeThreadRef(
+      environmentId as ScopedThreadRef["environmentId"],
+      threadId as ScopedThreadRef["threadId"],
+    );
+  }, [routeParams.environmentId, routeParams.threadId]);
 
   // Resolve the active instance entry by exact routing key. The composer
   // resolves fallbacks before rendering this component; if the selected
@@ -97,6 +115,30 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
       setUncontrolledIsMenuOpen(open);
     }
   };
+
+  const isModelHandoff = useCallback(
+    (instanceId: ProviderInstanceId) => {
+      if (handoffThreadRef === null || props.lockedProvider === null) return false;
+      const entry = props.instanceEntries.find((candidate) => candidate.instanceId === instanceId);
+      if (!entry) return false;
+      if (entry.driverKind !== props.lockedProvider) return true;
+      if (!props.lockedContinuationGroupKey) return false;
+      return entry.continuationGroupKey !== props.lockedContinuationGroupKey;
+    }, [
+      handoffThreadRef,
+      props.instanceEntries,
+      props.lockedContinuationGroupKey,
+      props.lockedProvider,
+    ],
+  );
+
+  const handleModelHandoff = useCallback(
+    (instanceId: ProviderInstanceId, model: string) => {
+      if (props.disabled || handoffThreadRef === null) return;
+      setIsMenuOpen(false);
+      void handoffModel(handoffThreadRef, { instanceId, model });
+    }, [handoffModel, handoffThreadRef, props.disabled],
+  );
 
   useEffect(() => {
     if (!isMenuOpen) {
@@ -239,6 +281,12 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
           {...(props.onOpenProviderSetup ? { onOpenProviderSetup: props.onOpenProviderSetup } : {})}
           {...(props.getModelDisabledReason
             ? { getModelDisabledReason: props.getModelDisabledReason }
+            : {})}
+          {...(handoffThreadRef !== null && props.lockedProvider !== null
+            ? {
+                isModelHandoff,
+                onModelHandoff: handleModelHandoff,
+              }
             : {})}
           onInstanceModelChange={handleInstanceModelChange}
         />
