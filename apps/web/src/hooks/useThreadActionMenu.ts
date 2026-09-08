@@ -16,7 +16,7 @@ import {
   type ThreadActionMenuId,
 } from "../components/threadActionMenu.logic";
 import { stackedThreadToast, toastManager } from "../components/ui/toast";
-import { environmentThreadDetails, threadEnvironment } from "../state/threads";
+import { threadEnvironment } from "../state/threads";
 import { environmentServerConfigsAtom } from "../state/server";
 import { useAtomCommand } from "../state/use-atom-command";
 import {
@@ -40,23 +40,19 @@ import { useCopyToClipboard } from "./useCopyToClipboard";
 import { useNewThreadHandler } from "./useHandleNewThread";
 import { useClientSettings } from "./useSettings";
 import { useThreadActions } from "./useThreadActions";
+import { useModelHandoff } from "./useModelHandoff";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import {
   deriveProviderInstanceEntries,
   isProviderInstancePickerReady,
 } from "../providerInstances";
 import {
-  buildModelHandoffMessage,
-  MODEL_HANDOFF_SUMMARY_REQUEST,
   modelHandoffActionId,
   parseModelHandoffActionId,
   type ModelHandoffActionId,
 } from "../lib/modelHandoff";
-import { newMessageId, newThreadId } from "../lib/utils";
 
 type ThreadMenuActionId = ThreadActionMenuId | "model-handoff" | ModelHandoffActionId;
-
-const MODEL_HANDOFF_SUMMARY_TIMEOUT_MS = 3 * 60_000;
 
 function failureToast(title: string, error: unknown) {
   toastManager.add(
@@ -66,60 +62,6 @@ function failureToast(title: string, error: unknown) {
       description: error instanceof Error ? error.message : "An error occurred.",
     }),
   );
-}
-
-function waitForGeneratedHandoffSummary(
-  threadRef: ScopedThreadRef,
-  existingAssistantMessageIds: ReadonlySet<string>,
-): Promise<string> {
-  const detailAtom = environmentThreadDetails.detailAtom(threadRef);
-
-  return new Promise((resolve, reject) => {
-    let unsubscribe: (() => void) | null = null;
-    let settled = false;
-    const timeout = window.setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      unsubscribe?.();
-      reject(new Error("The source model did not finish the handoff summary."));
-    }, MODEL_HANDOFF_SUMMARY_TIMEOUT_MS);
-
-    const finish = (summary: string) => {
-      if (settled) return;
-      settled = true;
-      window.clearTimeout(timeout);
-      unsubscribe?.();
-      resolve(summary);
-    };
-
-    const inspect = (detail: ReturnType<typeof appAtomRegistry.get>) => {
-      if (!detail || typeof detail !== "object" || !("messages" in detail)) return;
-      const thread = detail as {
-        readonly messages: ReadonlyArray<{
-          readonly id: string;
-          readonly role: string;
-          readonly text: string;
-        }>;
-        readonly latestTurn?: { readonly completedAt?: string | null } | null;
-      };
-      if (!thread.latestTurn?.completedAt) return;
-
-      for (let index = thread.messages.length - 1; index >= 0; index -= 1) {
-        const message = thread.messages[index];
-        if (
-          message?.role === "assistant" &&
-          !existingAssistantMessageIds.has(message.id) &&
-          message.text.trim().length > 0
-        ) {
-          finish(message.text.trim());
-          return;
-        }
-      }
-    };
-
-    unsubscribe = appAtomRegistry.subscribe(detailAtom, inspect);
-    inspect(appAtomRegistry.get(detailAtom));
-  });
 }
 
 /**
@@ -165,12 +107,7 @@ export function useThreadActionMenu(input: {
   const updateThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
   });
-  const createThreadCommand = useAtomCommand(threadEnvironment.create, {
-    reportFailure: false,
-  });
-  const startThreadTurn = useAtomCommand(threadEnvironment.startTurn, {
-    reportFailure: false,
-  });
+  const { handoffModel } = useModelHandoff();
   const handleNewThread = useNewThreadHandler();
   const markThreadUnread = useUiStateStore((s) => s.markThreadUnread);
   const confirmThreadDelete = useClientSettings((s) => s.confirmThreadDelete);
@@ -245,6 +182,7 @@ export function useThreadActionMenu(input: {
             handoffChildren.push({
               id: modelHandoffActionId({ instanceId: entry.instanceId, model: model.slug }),
               label: `${entry.displayName} · ${model.name}`,
+              icon: "arrow-right-left",
             });
           }
         }
@@ -268,120 +206,7 @@ export function useThreadActionMenu(input: {
 
         const handoffSelection = parseModelHandoffActionId(action);
         if (handoffSelection !== null) {
-          const sourceDetail = appAtomRegistry.get(environmentThreadDetails.detailAtom(threadRef));
-          const existingAssistantMessageIds = new Set(
-            (sourceDetail?.messages ?? [])
-              .filter((message) => message.role === "assistant")
-              .map((message) => message.id),
-          );
-          const summaryCreatedAt = new Date().toISOString();
-          const summaryStart = await startThreadTurn({
-            environmentId: threadRef.environmentId,
-            input: {
-              threadId: thread.id,
-              message: {
-                messageId: newMessageId(),
-                role: "user",
-                text: MODEL_HANDOFF_SUMMARY_REQUEST,
-                attachments: [],
-              },
-              modelSelection: thread.modelSelection,
-              titleSeed: thread.title,
-              runtimeMode: thread.runtimeMode,
-              interactionMode: thread.interactionMode,
-              createdAt: summaryCreatedAt,
-            },
-          });
-          if (summaryStart._tag === "Failure") {
-            if (!isAtomCommandInterrupted(summaryStart)) {
-              failureToast(
-                "Could not generate handoff summary",
-                squashAtomCommandFailure(summaryStart),
-              );
-            }
-            return;
-          }
-
-          toastManager.add({
-            type: "info",
-            title: "Generating handoff summary",
-            description: `${thread.modelSelection.model} is preparing context for ${handoffSelection.model}.`,
-          });
-
-          const summaryResult = await settlePromise(() =>
-            waitForGeneratedHandoffSummary(threadRef, existingAssistantMessageIds),
-          );
-          if (summaryResult._tag === "Failure") {
-            failureToast("Could not finish model handoff", squashAtomCommandFailure(summaryResult));
-            return;
-          }
-
-          const handoffMessage = buildModelHandoffMessage({
-            threadTitle: thread.title,
-            branch: thread.branch ?? null,
-            sourceModelSelection: thread.modelSelection,
-            targetModelSelection: handoffSelection,
-            summary: summaryResult.value,
-          });
-          const targetThreadId = newThreadId();
-          const targetCreatedAt = new Date().toISOString();
-          const createResult = await createThreadCommand({
-            environmentId: threadRef.environmentId,
-            input: {
-              threadId: targetThreadId,
-              projectId: thread.projectId,
-              title: thread.title,
-              modelSelection: handoffSelection,
-              runtimeMode: thread.runtimeMode,
-              interactionMode: "default",
-              branch: thread.branch,
-              worktreePath: thread.worktreePath,
-              createdAt: targetCreatedAt,
-            },
-          });
-          if (createResult._tag === "Failure") {
-            if (!isAtomCommandInterrupted(createResult)) {
-              failureToast("Could not create model handoff", squashAtomCommandFailure(createResult));
-            }
-            return;
-          }
-
-          const targetStart = await startThreadTurn({
-            environmentId: threadRef.environmentId,
-            input: {
-              threadId: targetThreadId,
-              message: {
-                messageId: newMessageId(),
-                role: "user",
-                text: handoffMessage,
-                attachments: [],
-              },
-              modelSelection: handoffSelection,
-              titleSeed: thread.title,
-              runtimeMode: thread.runtimeMode,
-              interactionMode: "default",
-              createdAt: targetCreatedAt,
-            },
-          });
-          if (targetStart._tag === "Failure" && !isAtomCommandInterrupted(targetStart)) {
-            failureToast(
-              "Handoff thread created, but the summary could not be sent",
-              squashAtomCommandFailure(targetStart),
-            );
-          }
-
-          await router.navigate({
-            to: "/$environmentId/$threadId",
-            params: {
-              environmentId: threadRef.environmentId,
-              threadId: targetThreadId,
-            },
-          });
-          toastManager.add({
-            type: "success",
-            title: "Model handoff complete",
-            description: `${handoffSelection.model} has been caught up and told to wait for your next message.`,
-          });
+          await handoffModel(threadRef, handoffSelection);
           return;
         }
 
@@ -570,9 +395,9 @@ export function useThreadActionMenu(input: {
       copyBranchToClipboard,
       copyPathToClipboard,
       copyThreadIdToClipboard,
-      createThreadCommand,
       deleteThread,
       handleNewThread,
+      handoffModel,
       logicalProjectKeyByPhysicalKey,
       markThreadUnread,
       onStartRename,
@@ -583,7 +408,6 @@ export function useThreadActionMenu(input: {
       router,
       settleThread,
       snoozeThread,
-      startThreadTurn,
       threadRef,
       timestampFormat,
       unsettleThread,
