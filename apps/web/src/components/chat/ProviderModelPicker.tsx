@@ -8,6 +8,7 @@ import {
 } from "@t3tools/contracts";
 import { useParams } from "@tanstack/react-router";
 import { memo, useCallback, useEffect, useMemo, useState } from "react";
+import { ArrowRightLeftIcon } from "lucide-react";
 import type { VariantProps } from "class-variance-authority";
 import { Badge } from "../ui/badge";
 import { buttonVariants } from "../ui/button";
@@ -76,6 +77,7 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
       threadId as ScopedThreadRef["threadId"],
     );
   }, [routeParams.environmentId, routeParams.threadId]);
+  const handoffEnabled = handoffThreadRef !== null && props.lockedProvider !== null;
 
   // Resolve the active instance entry by exact routing key. The composer
   // resolves fallbacks before rendering this component; if the selected
@@ -117,27 +119,32 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
   };
 
   const isModelHandoff = useCallback(
-    (instanceId: ProviderInstanceId) => {
-      if (handoffThreadRef === null || props.lockedProvider === null) return false;
+    (instanceId: ProviderInstanceId, model: string) => {
+      if (!handoffEnabled || props.lockedProvider === null) return false;
       const entry = props.instanceEntries.find((candidate) => candidate.instanceId === instanceId);
       if (!entry) return false;
+      const option = props.modelOptionsByInstance
+        .get(instanceId)
+        ?.find((candidate) => candidate.slug === model);
+      if (option?.isUnavailable) return false;
       if (entry.driverKind !== props.lockedProvider) return true;
       if (!props.lockedContinuationGroupKey) return false;
       return entry.continuationGroupKey !== props.lockedContinuationGroupKey;
     }, [
-      handoffThreadRef,
+      handoffEnabled,
       props.instanceEntries,
       props.lockedContinuationGroupKey,
       props.lockedProvider,
+      props.modelOptionsByInstance,
     ],
   );
 
-  const handleModelHandoff = useCallback(
+  const getPickerModelDisabledReason = useCallback(
     (instanceId: ProviderInstanceId, model: string) => {
-      if (props.disabled || handoffThreadRef === null) return;
-      setIsMenuOpen(false);
-      void handoffModel(handoffThreadRef, { instanceId, model });
-    }, [handoffModel, handoffThreadRef, props.disabled],
+      if (isModelHandoff(instanceId, model)) return null;
+      return props.getModelDisabledReason?.(instanceId, model) ?? null;
+    },
+    [isModelHandoff, props.getModelDisabledReason],
   );
 
   useEffect(() => {
@@ -190,8 +197,12 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
 
   const handleInstanceModelChange = (instanceId: ProviderInstanceId, model: string) => {
     if (props.disabled) return;
-    props.onInstanceModelChange(instanceId, model);
     setIsMenuOpen(false);
+    if (handoffThreadRef !== null && isModelHandoff(instanceId, model)) {
+      void handoffModel(handoffThreadRef, { instanceId, model });
+      return;
+    }
+    props.onInstanceModelChange(instanceId, model);
   };
 
   return (
@@ -258,7 +269,13 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
             </Badge>
           ) : null}
         </span>
-        <span aria-hidden="true" className="flex items-center">
+        <span aria-hidden="true" className="flex items-center gap-1">
+          {handoffEnabled ? (
+            <ArrowRightLeftIcon
+              className="size-3.5 text-muted-foreground/70"
+              aria-label="Cross-provider selections use model handoff"
+            />
+          ) : null}
           <ComposerControlChevron size={size} />
         </span>
       </PopoverTrigger>
@@ -271,23 +288,17 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
         <ModelPickerContent
           activeInstanceId={activeInstanceId}
           model={props.model}
-          lockedProvider={props.lockedProvider}
-          lockedContinuationGroupKey={props.lockedContinuationGroupKey ?? null}
+          lockedProvider={handoffEnabled ? null : props.lockedProvider}
+          lockedContinuationGroupKey={
+            handoffEnabled ? null : (props.lockedContinuationGroupKey ?? null)
+          }
           instanceEntries={props.instanceEntries}
           {...(props.keybindings ? { keybindings: props.keybindings } : {})}
           modelOptionsByInstance={props.modelOptionsByInstance}
           terminalOpen={props.terminalOpen ?? false}
           onRequestClose={() => setIsMenuOpen(false)}
           {...(props.onOpenProviderSetup ? { onOpenProviderSetup: props.onOpenProviderSetup } : {})}
-          {...(props.getModelDisabledReason
-            ? { getModelDisabledReason: props.getModelDisabledReason }
-            : {})}
-          {...(handoffThreadRef !== null && props.lockedProvider !== null
-            ? {
-                isModelHandoff,
-                onModelHandoff: handleModelHandoff,
-              }
-            : {})}
+          getModelDisabledReason={getPickerModelDisabledReason}
           onInstanceModelChange={handleInstanceModelChange}
         />
       </PopoverPopup>
