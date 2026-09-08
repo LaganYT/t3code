@@ -1,16 +1,31 @@
+import { scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { settlePromise } from "@t3tools/client-runtime/state/runtime";
 import {
   ArrowLeftIcon,
+  ArrowRightLeftIcon,
   ChartNoAxesColumnIcon,
   GitPullRequestIcon,
   SettingsIcon,
 } from "lucide-react";
 import type { ReactNode } from "react";
-import { memo, useCallback } from "react";
-import { Link, useCanGoBack, useLocation, useNavigate } from "@tanstack/react-router";
+import { memo, useCallback, useMemo } from "react";
+import {
+  Link,
+  useCanGoBack,
+  useLocation,
+  useNavigate,
+  useParams,
+} from "@tanstack/react-router";
+import type { ScopedThreadRef } from "@t3tools/contracts";
 
 import { useEnvironmentIdentificationMode } from "../../hooks/useSettings";
+import { useModelHandoff } from "../../hooks/useModelHandoff";
+import { parseModelHandoffActionId } from "../../lib/modelHandoff";
+import { buildModelHandoffMenuItem } from "../../lib/modelHandoffMenu";
 import { cn } from "../../lib/utils";
+import { readLocalApi } from "../../localApi";
 import { useEnvironments } from "../../state/environments";
+import { readThreadShell } from "../../state/entities";
 import { T3Wordmark } from "../T3Wordmark";
 import {
   resolveEnvironmentIdentificationPillLabel,
@@ -49,6 +64,48 @@ export const SidebarChromeHeader = memo(function SidebarChromeHeader({
     environmentIdentificationMode === "pill"
       ? resolveEnvironmentIdentificationPillLabel(stageLabel)
       : null;
+  const routeParams = useParams({ strict: false }) as Partial<
+    Record<"environmentId" | "threadId", string>
+  >;
+  const { handoffModel } = useModelHandoff();
+  const threadRef = useMemo((): ScopedThreadRef | null => {
+    if (!routeParams.environmentId || !routeParams.threadId) return null;
+    return scopeThreadRef(
+      routeParams.environmentId as ScopedThreadRef["environmentId"],
+      routeParams.threadId as ScopedThreadRef["threadId"],
+    );
+  }, [routeParams.environmentId, routeParams.threadId]);
+  const handoffAvailable =
+    threadRef !== null &&
+    readThreadShell(threadRef) !== null &&
+    buildModelHandoffMenuItem(threadRef)?.children?.length !== 0;
+
+  const handleHandoffClick = useCallback(
+    (event: React.MouseEvent<HTMLButtonElement>) => {
+      if (threadRef === null) return;
+      const api = readLocalApi();
+      if (!api) return;
+      const thread = readThreadShell(threadRef);
+      const handoffItem = buildModelHandoffMenuItem(threadRef, {
+        disabled:
+          thread?.session?.status === "running" && thread.session.activeTurnId != null,
+      });
+      const children = handoffItem?.children ?? [];
+      if (children.length === 0) return;
+      const rect = event.currentTarget.getBoundingClientRect();
+      void (async () => {
+        const clicked = await settlePromise(() =>
+          api.contextMenu.show(children, { x: rect.right, y: rect.bottom }),
+        );
+        if (clicked._tag === "Failure" || clicked.value === null) return;
+        const selection = parseModelHandoffActionId(clicked.value);
+        if (selection !== null) {
+          await handoffModel(threadRef, selection);
+        }
+      })();
+    },
+    [handoffModel, threadRef],
+  );
 
   return (
     <SidebarHeader
@@ -76,6 +133,28 @@ export const SidebarChromeHeader = memo(function SidebarChromeHeader({
         >
           {pillLabel}
         </Badge>
+      ) : null}
+      {handoffAvailable ? (
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <SidebarMenuButton
+                type="button"
+                size="icon"
+                aria-label="Continue with another model"
+                onClick={handleHandoffClick}
+                className={cn(
+                  "relative z-10 ml-auto size-7 shrink-0",
+                  backdropVariant &&
+                    "text-white/80 hover:bg-white/15 hover:text-white focus-visible:ring-white/90",
+                )}
+              />
+            }
+          >
+            <ArrowRightLeftIcon className="size-4" />
+          </TooltipTrigger>
+          <TooltipPopup side="bottom">Continue with another model</TooltipPopup>
+        </Tooltip>
       ) : null}
     </SidebarHeader>
   );
