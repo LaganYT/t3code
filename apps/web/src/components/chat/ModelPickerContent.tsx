@@ -150,6 +150,8 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
   onRequestClose?: () => void;
   onOpenProviderSetup?: (instanceId: ProviderInstanceId) => void;
   getModelDisabledReason?: (instanceId: ProviderInstanceId, model: string) => string | null;
+  isModelHandoff?: (instanceId: ProviderInstanceId, model: string) => boolean;
+  onModelHandoff?: (instanceId: ProviderInstanceId, model: string) => void;
   onInstanceModelChange: (instanceId: ProviderInstanceId, model: string) => void;
 }) {
   const {
@@ -157,6 +159,8 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     modelOptionsByInstance,
     instanceEntries,
     getModelDisabledReason,
+    isModelHandoff,
+    onModelHandoff,
     onInstanceModelChange,
   } = props;
   const [searchQuery, setSearchQuery] = useState("");
@@ -223,6 +227,13 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
   const serverKeybindings = useAtomValue(primaryServerKeybindingsAtom);
   const keybindings = providedKeybindings ?? serverKeybindings;
   const updateSettings = useUpdateClientSettings();
+  const handoffEnabled = isModelHandoff !== undefined && onModelHandoff !== undefined;
+
+  const isHandoffTarget = useCallback(
+    (instanceId: ProviderInstanceId, model: string) =>
+      handoffEnabled && isModelHandoff(instanceId, model),
+    [handoffEnabled, isModelHandoff],
+  );
 
   const focusSearchInput = useCallback(() => {
     searchInputRef.current?.focus({ preventScroll: true });
@@ -351,7 +362,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
   const isLocked = props.lockedProvider !== null;
   const isSearching = searchQuery.trim().length > 0;
   const lockedDisabledInstanceIds = useMemo(() => {
-    if (!isLocked) {
+    if (!isLocked || handoffEnabled) {
       return undefined;
     }
     const disabled = new Set<ProviderInstanceId>();
@@ -361,10 +372,10 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
       }
     }
     return disabled;
-  }, [instanceEntries, isLocked, matchesLockedProvider]);
+  }, [handoffEnabled, instanceEntries, isLocked, matchesLockedProvider]);
   const sidebarInstanceEntries = useMemo(() => {
     const enabledEntries = instanceEntries.filter(isProviderInstancePickerVisible);
-    if (!isLocked) {
+    if (!isLocked || handoffEnabled) {
       return enabledEntries;
     }
     const available: ProviderInstanceEntry[] = [];
@@ -377,7 +388,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
       }
     }
     return [...available, ...disabled];
-  }, [instanceEntries, isLocked, matchesLockedProvider]);
+  }, [handoffEnabled, instanceEntries, isLocked, matchesLockedProvider]);
   const showSidebar = !isSearching && sidebarInstanceEntries.length > 0;
   const instanceOrder = useMemo(
     () => instanceEntries.map((entry) => entry.instanceId),
@@ -424,10 +435,10 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
           } => rankedModel.score !== null,
         );
 
-      // When searching, we only respect locked provider (by driver kind),
-      // ignoring sidebar selection so account-scoped searches can find a
-      // model before the user chooses a specific instance rail item.
-      if (props.lockedProvider !== null) {
+      // A started thread normally locks search to its continuation provider.
+      // When handoff is available, cross-provider rows stay searchable and
+      // selecting one starts a handoff instead of mutating the existing session.
+      if (props.lockedProvider !== null && !handoffEnabled) {
         const lockedProviderMatches: Array<(typeof rankedMatches)[number]> = [];
         for (const rankedModel of rankedMatches) {
           if (matchesLockedProvider(rankedModel.model)) {
@@ -462,7 +473,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
         .map((rankedModel) => rankedModel.model);
     }
 
-    if (props.lockedProvider !== null) {
+    if (props.lockedProvider !== null && !handoffEnabled) {
       result = result.filter((m) => matchesLockedProvider(m));
       if (selectedInstanceId === "favorites") {
         result = result.filter((m) => favoritesSet.has(providerModelKey(m.instanceId, m.slug)));
@@ -483,6 +494,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
   }, [
     favoritesSet,
     flatModels,
+    handoffEnabled,
     instanceOrder,
     matchesLockedProvider,
     props.lockedProvider,
@@ -523,7 +535,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     !isSearching && props.onOpenProviderSetup
       ? instanceEntries.filter(
           (entry) =>
-            matchesLockedProvider(entry) &&
+            (handoffEnabled || matchesLockedProvider(entry)) &&
             shouldOfferModelPickerSetup(
               entry,
               modelOptionsByInstance.get(entry.instanceId) ?? [],
@@ -548,9 +560,6 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
 
   const handleModelSelect = useCallback(
     (modelSlug: string, instanceId: ProviderInstanceId) => {
-      if (getModelDisabledReason?.(instanceId, modelSlug)) {
-        return;
-      }
       const options = modelOptionsByInstance.get(instanceId);
       if (!options) {
         return;
@@ -563,11 +572,26 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
       // (slug casing etc.). Custom instances share their driver's
       // normalization rules, so pass the driver kind here.
       const resolvedModel = resolveSelectableModel(entry.driverKind, modelSlug, options);
-      if (resolvedModel) {
-        onInstanceModelChange(instanceId, resolvedModel);
+      if (!resolvedModel) {
+        return;
       }
+      if (isHandoffTarget(instanceId, resolvedModel)) {
+        onModelHandoff?.(instanceId, resolvedModel);
+        return;
+      }
+      if (getModelDisabledReason?.(instanceId, resolvedModel)) {
+        return;
+      }
+      onInstanceModelChange(instanceId, resolvedModel);
     },
-    [entryByInstanceId, getModelDisabledReason, modelOptionsByInstance, onInstanceModelChange],
+    [
+      entryByInstanceId,
+      getModelDisabledReason,
+      isHandoffTarget,
+      modelOptionsByInstance,
+      onInstanceModelChange,
+      onModelHandoff,
+    ],
   );
 
   const toggleFavorite = useCallback(
@@ -591,7 +615,10 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     >();
     let selectableModelIndex = 0;
     for (const model of visibleModels) {
-      if (getModelDisabledReason?.(model.instanceId, model.slug)) {
+      if (
+        !isHandoffTarget(model.instanceId, model.slug) &&
+        getModelDisabledReason?.(model.instanceId, model.slug)
+      ) {
         continue;
       }
       const jumpCommand = modelPickerJumpCommandForIndex(selectableModelIndex);
@@ -602,7 +629,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
       selectableModelIndex += 1;
     }
     return mapping;
-  }, [getModelDisabledReason, visibleModels]);
+  }, [getModelDisabledReason, isHandoffTarget, visibleModels]);
   const modelJumpModelKeys = useMemo(
     () => [...modelJumpCommandByKey.keys()],
     [modelJumpCommandByKey],
@@ -878,8 +905,10 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
                     if (!model) {
                       return null;
                     }
-                    const disabledReason =
-                      getModelDisabledReason?.(model.instanceId, model.slug) ?? null;
+                    const handoff = isHandoffTarget(model.instanceId, model.slug);
+                    const disabledReason = handoff
+                      ? null
+                      : (getModelDisabledReason?.(model.instanceId, model.slug) ?? null);
                     return (
                       <ModelListRow
                         key={modelKey}
@@ -898,6 +927,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
                         useTriggerLabel={false}
                         showNewBadge={model.badge === "new"}
                         unavailable={model.isUnavailable === true}
+                        handoff={handoff}
                         jumpLabel={modelJumpLabelByKey.get(modelKey) ?? null}
                         disabledReason={disabledReason}
                         onToggleFavorite={() => toggleFavorite(model.instanceId, model.slug)}
