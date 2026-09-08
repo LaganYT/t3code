@@ -6,7 +6,7 @@ import {
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
 import { canSnooze, effectiveSnoozed } from "@t3tools/client-runtime/state/thread-settled";
-import type { ScopedThreadRef, ThreadId } from "@t3tools/contracts";
+import type { ContextMenuItem, ScopedThreadRef, ThreadId } from "@t3tools/contracts";
 import { useRouter } from "@tanstack/react-router";
 import { useCallback, useMemo } from "react";
 
@@ -16,7 +16,8 @@ import {
   type ThreadActionMenuId,
 } from "../components/threadActionMenu.logic";
 import { stackedThreadToast, toastManager } from "../components/ui/toast";
-import { threadEnvironment } from "../state/threads";
+import { environmentThreadDetails, threadEnvironment } from "../state/threads";
+import { environmentServerConfigsAtom } from "../state/server";
 import { useAtomCommand } from "../state/use-atom-command";
 import {
   readEnvironmentSupportsPinning,
@@ -39,6 +40,20 @@ import { useCopyToClipboard } from "./useCopyToClipboard";
 import { useNewThreadHandler } from "./useHandleNewThread";
 import { useClientSettings } from "./useSettings";
 import { useThreadActions } from "./useThreadActions";
+import { appAtomRegistry } from "../rpc/atomRegistry";
+import { useComposerDraftStore } from "../composerDraftStore";
+import {
+  deriveProviderInstanceEntries,
+  isProviderInstancePickerReady,
+} from "../providerInstances";
+import {
+  buildModelHandoffPrompt,
+  modelHandoffActionId,
+  parseModelHandoffActionId,
+  type ModelHandoffActionId,
+} from "../lib/modelHandoff";
+
+type ThreadMenuActionId = ThreadActionMenuId | "model-handoff" | ModelHandoffActionId;
 
 function failureToast(title: string, error: unknown) {
   toastManager.add(
@@ -136,21 +151,96 @@ export function useThreadActionMenu(input: {
           titleRegeneration: readEnvironmentSupportsTitleRegeneration(threadRef.environmentId),
         };
         const isRegeneratingTitle = thread.titleRegeneration != null;
+        const isRunning = thread.session?.status === "running" && thread.session.activeTurnId != null;
         const snoozePresets = resolveSnoozePresets(now, timestampFormat);
-        const items = buildThreadActionMenuItems({
+        const baseItems = buildThreadActionMenuItems({
           branch: thread.branch ?? null,
           isPinned: thread.pinnedAt != null,
           isSettled: supports.settlement && thread.settledOverride === "settled",
           isSnoozed: supports.snooze && effectiveSnoozed(thread, { now: now.toISOString() }),
           canSnoozeNow: canSnooze(thread, { now: now.toISOString() }),
           isRegeneratingTitle,
-          isRunning: thread.session?.status === "running" && thread.session.activeTurnId != null,
+          isRunning,
           supports,
           snoozePresets,
         });
+
+        const serverConfig = appAtomRegistry
+          .get(environmentServerConfigsAtom)
+          .get(threadRef.environmentId);
+        const providerEntries = deriveProviderInstanceEntries(serverConfig?.providers ?? []);
+        const handoffChildren: Array<ContextMenuItem<ThreadMenuActionId>> = [];
+        for (const entry of providerEntries) {
+          if (!isProviderInstancePickerReady(entry)) continue;
+          for (const model of entry.models) {
+            if (
+              entry.instanceId === thread.modelSelection.instanceId &&
+              model.slug === thread.modelSelection.model
+            ) {
+              continue;
+            }
+            handoffChildren.push({
+              id: modelHandoffActionId({ instanceId: entry.instanceId, model: model.slug }),
+              label: `${entry.displayName} · ${model.name}`,
+            });
+          }
+        }
+        const handoffItem: ContextMenuItem<ThreadMenuActionId> = {
+          id: "model-handoff",
+          label: "Continue with another model",
+          icon: "arrow-right-left",
+          disabled: isRunning || handoffChildren.length === 0,
+          children: handoffChildren,
+        };
+        const insertionIndex = baseItems[0]?.id === "new-thread-on-branch" ? 1 : 0;
+        const items: ReadonlyArray<ContextMenuItem<ThreadMenuActionId>> = [
+          ...baseItems.slice(0, insertionIndex),
+          handoffItem,
+          ...baseItems.slice(insertionIndex),
+        ];
+
         const clicked = await settlePromise(() => api.contextMenu.show(items, position));
         if (clicked._tag === "Failure" || clicked.value === null) return;
-        const action: ThreadActionMenuId = clicked.value;
+        const action: ThreadMenuActionId = clicked.value;
+
+        const handoffSelection = parseModelHandoffActionId(action);
+        if (handoffSelection !== null) {
+          const detail = appAtomRegistry.get(environmentThreadDetails.detailAtom(threadRef));
+          const prompt = buildModelHandoffPrompt({
+            threadTitle: thread.title,
+            branch: thread.branch ?? null,
+            sourceModelSelection: thread.modelSelection,
+            targetModelSelection: handoffSelection,
+            messages: detail?.messages ?? [],
+          });
+          const opened = await settlePromise(() =>
+            handleNewThread(scopeProjectRef(threadRef.environmentId, thread.projectId), {
+              branch: thread.branch,
+              worktreePath: thread.worktreePath,
+              envMode: thread.worktreePath ? "worktree" : "local",
+              startFromOrigin: false,
+            }),
+          );
+          if (opened._tag === "Failure") {
+            failureToast("Could not create model handoff", squashAtomCommandFailure(opened));
+            return;
+          }
+          if (opened.value === null) return;
+
+          const draftStore = useComposerDraftStore.getState();
+          draftStore.setPrompt(opened.value.draftId, prompt);
+          draftStore.setModelSelection(opened.value.draftId, handoffSelection, {
+            explicit: true,
+            replaceOptions: true,
+          });
+          toastManager.add({
+            type: "success",
+            title: "Model handoff ready",
+            description: `Review the handoff summary, then send it to ${handoffSelection.model}.`,
+          });
+          return;
+        }
+
         if (action.startsWith("snooze:")) {
           const preset = snoozePresets.find((candidate) => `snooze:${candidate.id}` === action);
           if (!preset) return;
