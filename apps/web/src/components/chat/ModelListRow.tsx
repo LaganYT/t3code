@@ -1,6 +1,6 @@
 import { type ProviderDriverKind, type ProviderInstanceId } from "@t3tools/contracts";
 import { memo } from "react";
-import { StarIcon } from "lucide-react";
+import { ArrowRightLeftIcon, StarIcon } from "lucide-react";
 import {
   getDisplayModelName,
   getTriggerDisplayModelLabel,
@@ -36,6 +36,7 @@ export const ModelListRow = memo(function ModelListRow(props: {
   useTriggerLabel?: boolean;
   showNewBadge?: boolean;
   unavailable?: boolean;
+  handoff?: boolean;
   jumpLabel?: string | null;
   disabledReason?: string | null;
   onToggleFavorite: () => void;
@@ -94,6 +95,21 @@ export const ModelListRow = memo(function ModelListRow(props: {
       </div>
 
       <div className="flex shrink-0 items-center gap-1.5">
+        {props.handoff ? (
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <span className="inline-flex h-5 items-center gap-1 rounded px-1.5 text-[10px] font-medium text-muted-foreground" />
+              }
+            >
+              <ArrowRightLeftIcon className="size-3" />
+              <span>Continue</span>
+            </TooltipTrigger>
+            <TooltipPopup side="top" align="center">
+              Continue this thread with {getDisplayModelName(props.model)}
+            </TooltipPopup>
+          </Tooltip>
+        ) : null}
         {props.jumpLabel ? (
           <Kbd className="h-4 min-w-0 rounded-sm px-1.5 text-[10px]">{props.jumpLabel}</Kbd>
         ) : null}
