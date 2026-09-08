@@ -43,8 +43,10 @@ function handoffWarningToast(title: string, description: string) {
 function waitForGeneratedHandoffSummary(
   threadRef: ScopedThreadRef,
   existingAssistantMessageIds: ReadonlySet<string>,
+  summaryStartedAt: string,
 ): Promise<string> {
   const detailAtom = environmentThreadDetails.detailAtom(threadRef);
+  const summaryStartedAtMs = Date.parse(summaryStartedAt);
 
   return new Promise((resolve, reject) => {
     let unsubscribe: (() => void) | null = null;
@@ -63,6 +65,13 @@ function waitForGeneratedHandoffSummary(
       unsubscribe?.();
       resolve(summary);
     };
+    const fail = (message: string) => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timeout);
+      unsubscribe?.();
+      reject(new Error(message));
+    };
 
     const inspect = (detail: ReturnType<typeof appAtomRegistry.get>) => {
       if (!detail || typeof detail !== "object" || !("messages" in detail)) return;
@@ -74,7 +83,16 @@ function waitForGeneratedHandoffSummary(
         }>;
         readonly latestTurn?: { readonly completedAt?: string | null } | null;
       };
-      if (!thread.latestTurn?.completedAt) return;
+      const completedAt = thread.latestTurn?.completedAt;
+      if (!completedAt) return;
+      const completedAtMs = Date.parse(completedAt);
+      if (
+        Number.isFinite(summaryStartedAtMs) &&
+        Number.isFinite(completedAtMs) &&
+        completedAtMs < summaryStartedAtMs
+      ) {
+        return;
+      }
 
       for (let index = thread.messages.length - 1; index >= 0; index -= 1) {
         const message = thread.messages[index];
@@ -87,6 +105,11 @@ function waitForGeneratedHandoffSummary(
           return;
         }
       }
+
+      // A newly completed turn with no new assistant text means the provider
+      // failed before it could produce the summary (usage limit, auth, etc.).
+      // Fall back immediately instead of waiting for the full timeout.
+      fail("The source model completed without a handoff summary.");
     };
 
     unsubscribe = appAtomRegistry.subscribe(detailAtom, inspect);
@@ -163,7 +186,11 @@ export function useModelHandoff() {
         });
 
         const summaryResult = await settlePromise(() =>
-          waitForGeneratedHandoffSummary(threadRef, existingAssistantMessageIds),
+          waitForGeneratedHandoffSummary(
+            threadRef,
+            existingAssistantMessageIds,
+            summaryCreatedAt,
+          ),
         );
         if (summaryResult._tag === "Success") {
           summary = summaryResult.value;
@@ -209,7 +236,10 @@ export function useModelHandoff() {
       });
       if (createResult._tag === "Failure") {
         if (!isAtomCommandInterrupted(createResult)) {
-          handoffFailureToast("Could not create model handoff", squashAtomCommandFailure(createResult));
+          handoffFailureToast(
+            "Could not create model handoff",
+            squashAtomCommandFailure(createResult),
+          );
         }
         return false;
       }
